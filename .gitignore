@@ -10,3 +10,5 @@ dashboard/node_modules/
 dashboard/.next/
 dashboard/.env
 dashboard/.env.local
+dashboard/next-env.d.ts
+dashboard/*.tsbuildinfo

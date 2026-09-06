@@ -20,16 +20,16 @@ tested on its own — not a stub with `# TODO` where the money would go.
 | **1** | The bot itself: catalogue, wallet, buying, the Zentra API client, the database, the settings system | ✅ **done** |
 | **2** | USDT (BEP-20) — automatic, watched on-chain by polling a single RPC endpoint | ✅ **done** |
 | **3** | Binance Pay — automatic, read from the operator's own account (no merchant integration) | ✅ **done** |
-| 4 | The admin dashboard — settings, orders, customers, credit by hand | planned |
+| **4** | The admin dashboard — overview, settings, orders, customers, deposits, credit by hand | ✅ **done** |
 | 5 | Telebirr + Bank of Abyssinia — manual by default, automatic with LocalPaymentVerify | planned |
 
 **Right now, with just Phase 1**, the bot runs completely: customers browse
 the real Zentra catalogue at your markup, and an admin credits a balance by
-hand (`UPDATE users SET balance_usd = ...` today; a dashboard button in
-Phase 4). That is not a placeholder — it is the exact fallback every
-payment rail below keeps forever, in this project and in ZentraShopBot
-itself, because a payment that does not match anything automatic should
-never mean a customer simply loses their money.
+hand — a raw `UPDATE users SET balance_usd = ...`, or the dashboard's
+"Credit by hand" page from Phase 4 onward. That is not a placeholder — it
+is the exact fallback every payment rail below keeps forever, in this
+project and in ZentraShopBot itself, because a payment that does not match
+anything automatic should never mean a customer simply loses their money.
 
 ## Why a starter kit, not a one-click fork
 
@@ -89,8 +89,9 @@ INSERT INTO wallet_txns (user_id, amount_usd, kind) VALUES (
 3. Get one HTTP JSON-RPC endpoint for BNB Smart Chain — a free tier from
    dRPC, Ankr, or PublicNode all work.
 4. Set `BSC_PAYMENT_ADDRESS` and `BSC_HTTP_URL` in `.env`, then restart the bot.
-5. Turn the rail on: `UPDATE settings SET value = 'yes' WHERE key = 'usdt_enabled';`
-   (a dashboard button in Phase 4; direct SQL until then).
+5. Turn the rail on: flip "USDT (BEP-20) top-ups" to Yes on the dashboard's
+   Settings page, or `UPDATE settings SET value = 'yes' WHERE key = 'usdt_enabled';`
+   directly.
 
 Both the `.env` values and that setting have to be true together — either
 one missing and the top-up screen simply isn't offered. `docs/GUIDE.md` §9
@@ -111,7 +112,9 @@ account's Pay history, the same way ZentraShopBot itself does this.
    is what customers send to.
 4. Set `BINANCE_UID`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` in `.env`,
    then restart the bot.
-5. Turn the rail on: `UPDATE settings SET value = 'yes' WHERE key = 'binance_pay_enabled';`
+5. Turn the rail on: flip "Binance Pay top-ups" to Yes on the dashboard's
+   Settings page, or `UPDATE settings SET value = 'yes' WHERE key = 'binance_pay_enabled';`
+   directly.
 
 Same rule as USDT: both the `.env` credentials and that setting have to be
 true together. `docs/GUIDE.md` §10 covers the exact-amount matching (the
@@ -119,6 +122,42 @@ same fingerprint trick as USDT, at a different precision), why one sweep
 covers every open request in a single API call, and the two-signal check
 that decides whether a transaction is really a payment IN before anything
 is credited.
+
+### Turning on the admin dashboard — Phase 4
+
+A separate Next.js app in `dashboard/`, run and deployed on its own — it
+reads and writes the exact same database as the bot, so nothing here needs
+its own copy of anything.
+
+```bash
+psql "$DATABASE_URL" -f supabase/migrations/0004_admin_dashboard.sql
+cd dashboard
+npm install
+cp .env.example .env.local   # DATABASE_URL (session pooler) + ADMIN_PASSWORD
+npm run dev
+```
+
+Open `http://localhost:3000`, sign in with `ADMIN_PASSWORD`. Six pages:
+**Overview** (revenue, cost, profit, balances held, at a glance), **Orders**
+and **Customers** (searchable, with the same numbers the bot itself
+computed at the time — nothing here re-derives a price after the fact),
+**Deposits** (every top-up request on either rail, and whether it was
+credited), **Credit by hand** (the fallback above, from a form instead of
+raw SQL, still guarded by the same conditional-`UPDATE` rule as every other
+balance change in this project), and **Settings** (the markup and rail
+toggles above, editable without a restart or a database console).
+
+One password, not a per-admin account system — see
+`dashboard/src/lib/session.ts` for why that is deliberate: rotating
+`ADMIN_PASSWORD` signs every existing session out at once, on every device.
+Deploying it (Vercel or anywhere else that runs Next.js) needs the same two
+environment variables set in that platform's project settings — nothing
+about the app changes between `npm run dev` and a real deploy.
+
+`docs/GUIDE.md` §11 covers the dashboard in full: the session-cookie design,
+why it connects through the session pooler like the bot does, and the
+same-guard-as-the-bot principle behind "Credit by hand" and every write
+this app makes.
 
 ## Architecture
 
@@ -137,7 +176,11 @@ bot/
   money.py        Decimal rounding and display — the only place either happens
 
 supabase/migrations/   your schema, applied in order, same convention as ZentraShopBot
-dashboard/              the admin dashboard (Phase 4)
+dashboard/              Phase 4: the admin dashboard — a separate Next.js app
+  src/lib/              searches and writes, kept apart from pages so they test
+                        against a real database with no request in sight
+  src/app/              one route per page: overview, orders, customers,
+                        deposits, credit, settings, plus the login/session API
 docs/                   the full guide — auth, idempotency, every payment rail
 tests/                  a real PostgreSQL test suite; see "Testing" below
 ```
@@ -241,6 +284,28 @@ Every test that can be proven wrong, is: money-handling tests were
 verified during development by deliberately breaking the guard they check,
 confirming the test fails on the right assertion, and restoring it — the
 same discipline ZentraShopBot itself is held to.
+
+### The dashboard's own tests
+
+Apply migrations 0001-0004 to the same disposable database above, then:
+
+```bash
+cd dashboard
+npm install
+export TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/some_empty_db
+npm test
+```
+
+`npm test` runs `node --test` directly against the `.ts` sources (Node's
+own TypeScript stripping — no build step, no test framework beyond what
+Node ships) across `tests/auth.test.mjs`, `tests/retry.test.mjs`,
+`tests/settings.test.mjs`, `tests/credit.test.mjs`, `tests/customers.test.mjs`,
+`tests/orders.test.mjs` and `tests/deposits.test.mjs`. The same
+`supabase.co`/`supabase.com` refusal as the bot's own fixture applies here
+too — every test file that touches the database checks for it before doing
+anything else. `npm run typecheck` and `npm run build` both need to pass
+clean as well; a page that only "looks right" in the editor is not done
+until Next.js has actually compiled it.
 
 ## License
 
