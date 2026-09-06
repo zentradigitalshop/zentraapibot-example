@@ -18,8 +18,8 @@ tested on its own — not a stub with `# TODO` where the money would go.
 | Phase | What it adds | Status |
 |---|---|---|
 | **1** | The bot itself: catalogue, wallet, buying, the Zentra API client, the database, the settings system | ✅ **done** |
-| 2 | USDT (BEP-20) — automatic, watched on-chain | planned |
-| 3 | Binance Pay — automatic, via their merchant API | planned |
+| **2** | USDT (BEP-20) — automatic, watched on-chain by polling a single RPC endpoint | ✅ **done** |
+| **3** | Binance Pay — automatic, read from the operator's own account (no merchant integration) | ✅ **done** |
 | 4 | The admin dashboard — settings, orders, customers, credit by hand | planned |
 | 5 | Telebirr + Bank of Abyssinia — manual by default, automatic with LocalPaymentVerify | planned |
 
@@ -73,7 +73,7 @@ python -m bot.bot
 ```
 
 Open your bot in Telegram, `/start`, tap Shop. To let a customer actually
-buy something before Phase 2 lands, credit them by hand:
+buy something without a payment rail turned on, credit them by hand:
 
 ```sql
 UPDATE users SET balance_usd = balance_usd + 10.00 WHERE telegram_id = 123456789;
@@ -81,13 +81,56 @@ INSERT INTO wallet_txns (user_id, amount_usd, kind) VALUES (
   (SELECT id FROM users WHERE telegram_id = 123456789), 10.00, 'admin_credit');
 ```
 
+### Turning on USDT (BEP-20) top-ups — Phase 2
+
+1. Apply the second migration: `psql "$DATABASE_URL" -f supabase/migrations/0002_usdt_deposits.sql`
+2. Get a public BSC receiving address — a wallet you hold, never an
+   exchange deposit address (see `docs/GUIDE.md` §9 for why).
+3. Get one HTTP JSON-RPC endpoint for BNB Smart Chain — a free tier from
+   dRPC, Ankr, or PublicNode all work.
+4. Set `BSC_PAYMENT_ADDRESS` and `BSC_HTTP_URL` in `.env`, then restart the bot.
+5. Turn the rail on: `UPDATE settings SET value = 'yes' WHERE key = 'usdt_enabled';`
+   (a dashboard button in Phase 4; direct SQL until then).
+
+Both the `.env` values and that setting have to be true together — either
+one missing and the top-up screen simply isn't offered. `docs/GUIDE.md` §9
+covers how the watcher recognises a payment (the amount itself is the
+fingerprint), the confirmation delay, and why this starter polls a single
+endpoint instead of running ZentraShopBot's own multi-provider WebSocket
+listener.
+
+### Turning on Binance Pay top-ups — Phase 3
+
+**Not a merchant integration** — it reads your own personal Binance
+account's Pay history, the same way ZentraShopBot itself does this.
+
+1. Apply the third migration: `psql "$DATABASE_URL" -f supabase/migrations/0003_binance_pay.sql`
+2. Binance app → Profile → API Management → create a key with **read-only**
+   permission. Never enable withdrawals or trading on it.
+3. Find your Binance ID (a UID, near the top of your Profile page) — this
+   is what customers send to.
+4. Set `BINANCE_UID`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` in `.env`,
+   then restart the bot.
+5. Turn the rail on: `UPDATE settings SET value = 'yes' WHERE key = 'binance_pay_enabled';`
+
+Same rule as USDT: both the `.env` credentials and that setting have to be
+true together. `docs/GUIDE.md` §10 covers the exact-amount matching (the
+same fingerprint trick as USDT, at a different precision), why one sweep
+covers every open request in a single API call, and the two-signal check
+that decides whether a transaction is really a payment IN before anything
+is credited.
+
 ## Architecture
 
 ```
 bot/
   zentra_api.py   the ONLY file that talks to Zentra — auth, errors, money as Decimal
-  bot.py          the Telegram bot; purchase() is the one function that moves money
-  db.py           your own customers, wallet ledger, orders — never Zentra's data
+  bot.py          the Telegram bot; purchase() moves money out, deposits move it in
+  db.py           your own customers, wallet ledger, orders, deposits — never Zentra's data
+  chain/          Phase 2: USDT (BEP-20) — abi.py decodes, rpc.py asks the chain,
+                  watcher.py polls and credits
+  binance_pay.py  Phase 3: Binance Pay — reads the operator's own account,
+                  no merchant integration
   settings.py     the runtime overlay: markup and rail toggles, editable without a restart
   pricing.py      your markup, applied once, in one place
   config.py       secrets and infrastructure, read once from .env
@@ -134,6 +177,36 @@ instead.
   important branch in the whole codebase; it has its own test in
   `tests/test_purchase.py`, verified by sabotaging each direction and
   watching it fail.
+- **A deposit's amount is unique while it can still be paid — decided by the
+  database, not a `SELECT`.** BEP-20 transfers carry no memo field, so the
+  exact amount (a tiny decimal tail added on top of what a customer asked
+  for) is the only thing identifying which deposit a payment belongs to.
+  `allocate_deposit()` attempts each candidate as an `INSERT` and lets a
+  partial `UNIQUE` index decide whether it collided — proven in
+  `tests/test_deposits.py` by firing several concurrent requests at once and
+  checking every one gets a genuinely distinct figure.
+- **An expired deposit's amount stays reserved.** A customer's exchange
+  withdrawal can take longer than the request stayed open; if the exact
+  figure were freed the moment it expired, a late payment could credit
+  whoever is issued that same amount next. The cooldown closes that gap,
+  and the test suite proves it by sabotaging the check and watching a second
+  customer get issued an amount still cooling down.
+- **A transaction hash credits at most one deposit, ever** — a `UNIQUE`
+  index, not application logic remembering. The same on-chain event
+  arriving twice (a restart, an overlapping poll window) is a no-op the
+  second time, not a second credit.
+- **A deposit's amount is unique PER RAIL, not globally.** A $20 USDT
+  request and a $20 Binance Pay request are matched by two entirely
+  different workers reading two entirely different systems, so there is no
+  reason to make them compete for the same figure — each rail's allocator
+  is scoped by `method` in the same index that makes the amount unique.
+  Proved by literally dropping that scoping and watching two rails
+  genuinely collide over one figure, then restoring it.
+- **A Binance Pay transaction is trusted only when two independent signals
+  agree it is incoming: the sign of the amount, and whether the receiver
+  id is the operator's own account.** The one time they might disagree — a
+  transaction type nobody anticipated — the payment is refused rather than
+  guessed at, exactly as ZentraShopBot's own matching does.
 
 ## Testing
 
@@ -143,10 +216,19 @@ export TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/some_empty_db
 cd ..
 python -m tests.test_money
 python -m tests.test_pricing
+python -m tests.test_config
 python -m tests.test_zentra_api
+python -m tests.test_chain_abi
+python -m tests.test_chain_rpc
+python -m tests.test_binance_pay
+python -m tests.test_binance_client
 python -m tests.test_db
 python -m tests.test_settings
+python -m tests.test_deposits
+python -m tests.test_watcher
+python -m tests.test_binance_sweep
 python -m tests.test_purchase
+python -m tests.test_topup_flow
 python -m tests.test_lint
 ```
 

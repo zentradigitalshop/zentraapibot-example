@@ -68,9 +68,18 @@ class Config:
     usdt_contract_address: str
 
     # ---- payment rails: Binance Pay -----------------------------------
-    binance_pay_merchant_id: str
-    binance_pay_api_key: str
-    binance_pay_api_secret: str
+    #
+    # NOT A MERCHANT INTEGRATION. Binance Pay's merchant API needs a
+    # business account and an approval process — most resellers starting
+    # out have neither. This rail instead reads YOUR OWN personal Binance
+    # account's Pay history through a signed, read-only API key: a customer
+    # sends an ordinary transfer to your Binance UID, and the bot confirms
+    # it by asking Binance what your own account received. Exactly how
+    # ZentraShopBot itself does this.
+    binance_uid: str
+    binance_api_key: str
+    binance_api_secret: str
+    binance_api_base: str
 
     # ---- payment rails: Telebirr / Bank of Abyssinia (manual + verified) ---
     # Verified means LocalPaymentVerify confirms the receipt automatically;
@@ -82,12 +91,21 @@ class Config:
 
     @property
     def bsc_rpc_enabled(self) -> bool:
-        return bool(self.bsc_wss_url and self.bsc_http_url and self.bsc_payment_address)
+        """True when the USDT watcher has everything it needs to run.
+
+        BSC_WSS_URL is NOT required here, deliberately — the Phase 2 watcher
+        polls a single HTTP endpoint (see bot/chain/rpc.py's own docstring
+        for why), and requiring a WebSocket URL nobody's code reads would be
+        exactly the kind of unnecessary setup step that keeps a reseller
+        from finishing configuration. The field exists in case a future
+        phase moves to an event-driven listener; it costs nothing to leave
+        unused today.
+        """
+        return bool(self.bsc_http_url and self.bsc_payment_address)
 
     @property
     def binance_pay_enabled(self) -> bool:
-        return bool(self.binance_pay_merchant_id and self.binance_pay_api_key
-                    and self.binance_pay_api_secret)
+        return bool(self.binance_uid and self.binance_api_key and self.binance_api_secret)
 
     @property
     def local_verify_enabled(self) -> bool:
@@ -117,9 +135,10 @@ class Config:
             bsc_http_url=_str("BSC_HTTP_URL"),
             usdt_contract_address=_str(
                 "USDT_CONTRACT_ADDRESS", "0x55d398326f99059fF775485246999027B3197955"),
-            binance_pay_merchant_id=_str("BINANCE_PAY_MERCHANT_ID"),
-            binance_pay_api_key=_str("BINANCE_PAY_API_KEY"),
-            binance_pay_api_secret=_str("BINANCE_PAY_API_SECRET"),
+            binance_uid=_str("BINANCE_UID"),
+            binance_api_key=_str("BINANCE_API_KEY"),
+            binance_api_secret=_str("BINANCE_API_SECRET"),
+            binance_api_base=_str("BINANCE_API_BASE", "https://api.binance.com"),
             local_verify_url=_str("LOCAL_VERIFY_URL"),
             local_verify_api_key=_str("LOCAL_VERIFY_API_KEY"),
         )
