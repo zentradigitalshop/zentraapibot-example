@@ -120,6 +120,13 @@ async def main() -> None:
     assert order_row["zentra_reference"] == result["reference"]
     ok("the local order record matches what was actually charged and delivered")
 
+    # What Zentra charged (the PRODUCT'S OWN price, before this bot's
+    # markup) versus what the customer paid (WITH the markup) — the
+    # dashboard's profit figure is exactly this difference.
+    assert order_row["zentra_price_snapshot"] == Decimal("1.00")  # product.price x 1
+    assert order_row["price_snapshot"] == Decimal("1.20")         # sell_price at 20%
+    ok("the order records Zentra's own price separately from what the customer paid")
+
     # ---- insufficient balance -----------------------------------------------------
 
     print("\nNot enough money")

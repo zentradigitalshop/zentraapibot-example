@@ -147,6 +147,7 @@ class Db:
     async def create_pending_order(
         self, *, user_id: int, zentra_product_id: str, product_name: str,
         quantity: int, price_snapshot: Decimal, idempotency_key: str,
+        zentra_price_snapshot: Decimal | None = None,
     ) -> Row:
         """A row that exists from the moment money moves, before Zentra is
         ever called. An order that only got written down AFTER a successful
@@ -154,13 +155,20 @@ class Db:
         for it if the process died in between — exactly the failure mode
         idempotency_key's UNIQUE constraint exists to make retryable rather
         than silent.
+
+        `zentra_price_snapshot` is what Zentra will charge YOUR wallet for
+        this order — known before the call, since it is just the product's
+        own listed price times the quantity. Recorded here rather than
+        after delivery so it exists even for an order that fails: the
+        admin dashboard's profit figure should not go blank on the one
+        order that needed explaining.
         """
         return await self.fetchone(
             "INSERT INTO orders (user_id, zentra_product_id, product_name, "
-            "quantity, price_snapshot, idempotency_key, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, 'pending') RETURNING *",
+            "quantity, price_snapshot, zentra_price_snapshot, idempotency_key, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending') RETURNING *",
             (user_id, str(zentra_product_id), product_name, quantity,
-             price_snapshot, idempotency_key),
+             price_snapshot, zentra_price_snapshot, idempotency_key),
         )
 
     async def mark_order_delivered(
