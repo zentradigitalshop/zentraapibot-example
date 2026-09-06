@@ -236,10 +236,146 @@ with no basis for the choice.
 
 ## 11. The admin dashboard
 
-Coming in Phase 4: settings (your markup, which rails are live), a live
-order feed, your customer list, and Credit by hand — the fallback every
-rail above depends on. Until then, the same things are done directly
-against the database; see the README's Quickstart for the exact SQL.
+A separate Next.js app, in `dashboard/`, deployed on its own — it reads and
+writes the exact same PostgreSQL database as the bot, through the same
+`settings`, `orders`, `deposits` and `users` tables, so the two never see a
+different picture of your shop. Nothing about the bot changes because the
+dashboard exists; nothing about the dashboard requires the bot to be
+running, either — it is a second reader/writer of one database, not a
+second brain.
+
+**Why a separate app, not a page bolted onto the bot.** The bot is a
+long-running process that holds a database connection open around the
+clock and talks to Telegram; the dashboard is a handful of server-rendered
+pages an admin opens a few times a day. Deploying them together would mean
+every dashboard change risks the bot's uptime, and every bot dependency
+(aiogram, the chain watcher, the Binance sweeper) ships to a surface that
+never needs any of it.
+
+### Authentication — one password, not a user system
+
+`ADMIN_PASSWORD` is the whole of authentication. There is no accounts
+table, no sign-up flow, no password reset — a solo reseller does not need
+any of that machinery, and building it would be effort spent on a problem
+this project does not have.
+
+The session cookie is a signed token, not a database row: `issueSession()`
+signs `{since, exp}` with an HMAC key **derived from `ADMIN_PASSWORD`
+itself** (`dashboard/src/lib/session.ts`). That single fact is what makes
+one shared password a defensible design rather than a shortcut — rotating
+`ADMIN_PASSWORD` in your deployment's environment invalidates every
+existing session, on every device, instantly, with no "sign out
+everywhere" button to build or forget to click. `readSession()` verifies
+the signature and the expiry in constant time (`timingSafeEqual`) and
+fails closed on anything it cannot parse — a missing `ADMIN_PASSWORD`, a
+tampered cookie, a session issued under an old password, all read back as
+simply "not signed in," never a crash.
+
+`session.ts` holds all of this with **no import of `next/headers`** —
+deliberately, so `passwordMatches()` and `readSession()` can be exercised
+by a plain `node --test`, the same as any other pure function in this
+project. `dashboard/src/lib/auth.ts` is the thin, framework-coupled layer
+on top: `currentAdmin()`/`requireAdmin()` read the actual cookie off the
+real request, and every page starts with `await requireAdmin()` — a
+middleware redirect to `/login` is a convenience for a signed-out visitor,
+not the security boundary; each page checks for itself.
+
+A crude per-process rate limiter (`tooManyAttempts`/`recordFailure`) slows
+down guessing at the login form. It is honestly weaker on serverless than
+it looks — a cold start is a fresh process with a fresh empty map — which
+is exactly why the real defence documented here is a long, random
+password, not this limiter.
+
+### Connecting to the same database the bot uses
+
+`dashboard/src/lib/db.ts` connects through the **session pooler** (port
+5432), the same one `bot/db.py` uses — not the transaction pooler (6543)
+usual serverless advice reaches for. Supavisor keeps a separate pool per
+mode and tears one down once nothing is using it; the bot holds a
+session-mode connection open around the clock, so that pool is always warm,
+while a transaction-mode pool with only this dashboard using it gets torn
+down between visits and cold-starts on the next one. That cold start is
+what an occasional first-load timeout would look like, for no reason a
+user could see. One administrator visiting occasionally, at `max: 1`
+connections per invocation, is exactly the case session mode is fine for.
+
+`withRetry()` (`dashboard/src/lib/retry.ts`) retries a **transient**
+failure — a recycled pooler connection, a Supavisor cold start, a closed
+socket — up to four times with increasing backoff, and never retries
+anything else: a constraint violation retried three times just arrives
+late, it does not become correct. Every page and server action that
+touches the database wraps its query in this, for the same reason
+`zentra_api.py`'s own client treats a `202 unresolved` as a real error
+rather than a success it forgot to check.
+
+### The same guard, every time money moves
+
+`dashboard/src/lib/credit.ts`'s `creditByHand()` is "Credit by hand" from
+the README — the fallback every payment rail keeps forever, for a payment
+that arrives by some method the bot does not watch. It uses **the exact
+same rule** as `bot/db.py`'s `adjust_balance()`: the non-negative check is
+part of the `UPDATE`'s own `WHERE` clause, never a `SELECT` beforehand. An
+admin debiting a customer at the same instant that customer spends the
+last of their own balance from the bot is a real race — the dashboard and
+the bot are two different processes hitting the same row — and only the
+database serialising the two `UPDATE`s resolves it to exactly one winner.
+`dashboard/tests/credit.test.mjs` proves this the same way every other
+guard in this project is proved: ten simultaneous debits against a balance
+that can only satisfy one, asserting exactly one wins, and a deliberate
+sabotage of the guard during development that reproduced the database's
+own `CHECK` constraint failing as a raw, unhandled error — confirming the
+guard's necessity — before being restored.
+
+### Settings, kept honest against the bot's own parsing
+
+`dashboard/src/lib/settings.ts`'s `parse()` mirrors `bot/settings.py`'s
+rules — the same `yes`/`no` spellings, the same integer-must-be-whole
+check, the same min/max bounds read from the row itself rather than
+hard-coded. The two are not generated from one source; what keeps them
+from drifting is that both read their type and bounds from the same
+`settings` row, so the only thing each side can get wrong is its own
+interpretation of that row — which is exactly what
+`dashboard/tests/settings.test.mjs` checks, independently of any database,
+before ever testing the write path itself. `writeSetting()` writes the new
+value and a `settings_history` row in one transaction, exactly like the
+bot's own settings writes, and refuses outright — no value changed, no
+history written — for an out-of-bounds value or a key that does not exist.
+
+### The pages
+
+Six of them, each a server component that runs its own `requireAdmin()`
+check and reads through `withRetry`:
+
+- **Overview** (`src/app/page.tsx`) — the shop-wide numbers, computed with
+  SQL `SUM()` rather than pulled into JS and reduced, because this covers
+  every row in the table, not a bounded search result.
+- **Orders** and **Customers** — searchable (`searchOrders`/
+  `searchCustomers` in `src/lib/`), with a `LIMIT 200` and their own
+  display-only total cards computed by reducing over the *search result*,
+  not the whole table — the distinction that matters is between a ledger
+  figure (always SQL-side, always the full table) and a page's own summary
+  of what it is currently showing.
+- **Deposits** — every top-up request on either rail in one list,
+  filterable by `method` so a $20 USDT request and a $20 Binance Pay
+  request are never confused for one another here either.
+- **Credit by hand** and **Settings** — described above.
+
+Every write on every page is a plain `<form action={...}>` React Server
+Action — no client-side fetch call assembling a request by hand, and the
+app works with JavaScript disabled except for the two client components
+(`CreditForm`, `SettingRowForm`) that use `useActionState` purely to show a
+pending/result state without a full page reload.
+
+### Testing it
+
+`dashboard/tests/*.test.mjs` run with `node --test --experimental-strip-types`
+directly against the `.ts` sources — Node's own TypeScript stripping, no
+build step, no separate test framework. The one file that could not be
+tested this way, `auth.ts`, imports `next/headers`, which only resolves
+inside the Next.js runtime — which is exactly why the pure logic lives in
+`session.ts` instead, and `auth.ts` is left as a thin wrapper nothing
+tests directly. See the README's "The dashboard's own tests" for the exact
+commands.
 
 ---
 
