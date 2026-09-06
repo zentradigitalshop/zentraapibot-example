@@ -1,0 +1,12 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# dashboard (Next.js)
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.env
+dashboard/.env.local
