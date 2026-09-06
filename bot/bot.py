@@ -1,18 +1,16 @@
-"""The Telegram bot. Phase 1: catalogue, wallet balance, and buying with
-whatever balance a customer already has.
+"""The Telegram bot. Phase 1 added catalogue, wallet balance, and buying.
+Phase 2 adds automatic USDT (BEP-20) top-ups, watched on-chain.
 
-NO PAYMENT RAIL CREDITS A WALLET YET. That is Phases 2 through 5 — USDT
-BEP-20, Binance Pay, Telebirr and Bank of Abyssinia, one migration and one
-module each, documented in docs/PAYMENTS.md as they land. Until then an
-admin credits a customer by hand from the dashboard's Credit by hand page —
-which is also the fallback every one of those rails keeps forever, exactly
-as ZentraShopBot does, because a payment that does not match anything
-automatic should never mean a customer simply loses their money.
+BINANCE PAY, TELEBIRR AND BANK OF ABYSSINIA ARE NOT WIRED UP YET — Phases 3
+and 5. Until they land, an admin credits a customer by hand from the
+dashboard's Credit by hand page, which is also the fallback every rail
+keeps forever, exactly as ZentraShopBot does, because a payment that does
+not match anything automatic should never mean a customer simply loses
+their money.
 
-WHERE THE MONEY ACTUALLY MOVES: purchase() below, and nowhere else. Every
-button that can end in a charge calls this one function. A second
-implementation of "debit, call Zentra, deliver or refund" is a second place
-for those three steps to fall out of order.
+WHERE THE MONEY ACTUALLY MOVES: purchase() below for spending, and
+UsdtWatcher.credit_deposit (via bot/db.py) for USDT top-ups — nowhere else.
+Every button that can end in a charge calls one of exactly these two paths.
 """
 
 from __future__ import annotations
@@ -21,10 +19,12 @@ import asyncio
 import html
 import logging
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -32,6 +32,7 @@ from aiogram.types import (
     Message,
 )
 
+from .chain import BscRpc, UsdtWatcher
 from .config import Config
 from .db import Db
 from .money import fmt_usdt
@@ -50,6 +51,13 @@ zentra = ZentraClient(cfg.zentra_api_key, base_url=cfg.zentra_api_base_url)
 
 bot = Bot(token=cfg.bot_token)
 dp = Dispatcher()
+
+usdt_watcher: UsdtWatcher | None = None
+_usdt_rpc: BscRpc | None = None
+
+
+class TopUp(StatesGroup):
+    amount = State()
 
 
 def button(text: str, callback_data: str) -> InlineKeyboardButton:
@@ -251,17 +259,99 @@ async def buy(call: CallbackQuery) -> None:
     await call.message.answer("\n".join(lines))
 
 
+def usdt_rail_live() -> bool:
+    """Whether a customer can actually be offered USDT top-ups right now.
+
+    Two things have to agree: the OPERATOR turned it on in the dashboard
+    (`usdt_enabled`), and the DEPLOYMENT has somewhere to check payments
+    against (`BSC_HTTP_URL` and `BSC_PAYMENT_ADDRESS` in .env). A dashboard
+    switch with no watcher behind it would show a payment screen nothing is
+    ever going to look at — so both must be true, not either.
+    """
+    return bool(live.get("usdt_enabled", False)) and cfg.bsc_rpc_enabled
+
+
 @dp.callback_query(F.data == "wallet")
 async def wallet(call: CallbackQuery) -> None:
     user = await db.ensure_user(call.from_user.id, call.from_user.username)
     balance = await db.balance(user["id"])
+    rows = []
+    if usdt_rail_live():
+        rows.append([button("➕ Top up with USDT (BEP-20)", "topup_usdt")])
+    rows.append([button("« Menu", "home")])
+
+    text = f"💳 <b>Your wallet</b>\n\nBalance: <b>{fmt_usdt(balance)}</b>"
+    if not usdt_rail_live():
+        text += ("\n\nTo top up, contact support — automatic top-ups "
+                 "are not turned on yet.")
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await call.answer()
+
+
+@dp.callback_query(F.data == "topup_usdt")
+async def topup_usdt_start(call: CallbackQuery, state: FSMContext) -> None:
+    if not usdt_rail_live():
+        await call.answer("USDT top-ups are not turned on.", show_alert=True)
+        return
+
+    minimum = live.decimal("min_topup_usd", "1")
+    await state.set_state(TopUp.amount)
     await call.message.edit_text(
-        f"💳 <b>Your wallet</b>\n\nBalance: <b>{fmt_usdt(balance)}</b>\n\n"
-        f"To top up, contact support — automatic top-ups are not wired up "
-        f"in this starter yet. See docs/PAYMENTS.md.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("« Menu", "home")]]),
+        f"➕ <b>Top up with USDT</b>\n\n"
+        f"How much do you want to add? Send a number — minimum {fmt_usdt(minimum)}.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("« Cancel", "wallet")]]),
     )
     await call.answer()
+
+
+@dp.message(TopUp.amount)
+async def topup_usdt_amount(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace(",", "")
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        await message.answer("That doesn't look like a number. Try again, or /start to cancel.")
+        return
+
+    minimum = live.decimal("min_topup_usd", "1")
+    if amount < minimum:
+        await message.answer(
+            f"The smallest top-up is {fmt_usdt(minimum)}. Send a larger amount, "
+            f"or /start to cancel."
+        )
+        return
+
+    await state.clear()
+    user = await db.ensure_user(message.from_user.id, message.from_user.username)
+
+    try:
+        deposit = await db.allocate_deposit(
+            user_id=user["id"], base_amount=amount,
+            window_minutes=int(live.get("deposit_window_minutes", 60)),
+            cooldown_minutes=int(live.get("usdt_amount_cooldown_minutes", 1440)),
+            tail_min=1, tail_max=99,
+        )
+    except RuntimeError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+
+    exact = Decimal(deposit["amount_expected"])
+    minutes = int(live.get("deposit_window_minutes", 60))
+    await message.answer(
+        f"💳 <b>Send exactly this much</b>\n\n"
+        f"Network: <b>BNB Smart Chain (BEP-20) ONLY</b>\n\n"
+        f"<code>{exact}</code> USDT\n\n"
+        f"To this address:\n<code>{html.escape(cfg.bsc_payment_address)}</code>\n\n"
+        f"⚠️ <b>Send exactly {exact}, not a rounded number.</b> Those last "
+        f"digits are how this is recognised as yours — a rounded amount is "
+        f"not detected automatically.\n\n"
+        f"Your balance updates on its own once the network confirms it, "
+        f"usually within a minute or two. You do not need to come back here.\n\n"
+        f"<i>Valid for {minutes} minutes. Another network can lose the funds "
+        f"permanently — BEP-20 only.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("« Menu", "home")]]),
+    )
 
 
 @dp.callback_query(F.data == "orders")
@@ -283,9 +373,32 @@ async def orders(call: CallbackQuery) -> None:
     await call.answer()
 
 
+async def notify_credited(deposit: dict) -> None:
+    """Tell a customer their USDT top-up landed. Runs AFTER the balance is
+    already updated — this never decides whether to credit anything, only
+    whether the customer hears about it."""
+    user = await db.user_by_id(deposit["user_id"])
+    if user is None:
+        return
+    try:
+        await bot.send_message(
+            user["telegram_id"],
+            f"✅ <b>Top-up received!</b>\n\n"
+            f"+{fmt_usdt(Decimal(deposit['amount_credited']))} added to your wallet.",
+        )
+    except Exception:  # noqa: BLE001
+        # A customer who blocked the bot, or a Telegram hiccup, must not
+        # take the watcher down — their balance is already correct either
+        # way; only the notification failed.
+        log.exception("Could not notify user %s of their credited deposit.",
+                      user["telegram_id"])
+
+
 # ---- lifecycle -----------------------------------------------------------
 
 async def main() -> None:
+    global usdt_watcher, _usdt_rpc
+
     await db.connect()
     await live.refresh()
     log.info("Connected. Markup: %s%%", live.get("markup_pct"))
@@ -297,9 +410,36 @@ async def main() -> None:
 
     asyncio.create_task(refresh_loop())
 
+    watcher_task = None
+    if cfg.bsc_rpc_enabled:
+        # Started whenever the DEPLOYMENT is configured for it, regardless
+        # of the dashboard's usdt_enabled switch — the switch only decides
+        # whether a CUSTOMER is offered the top-up screen; the watcher
+        # itself does no harm running with nothing to match against, and
+        # starting it unconditionally means flipping the setting on takes
+        # effect immediately rather than needing a restart.
+        _usdt_rpc = BscRpc(cfg.bsc_http_url)
+        usdt_watcher = UsdtWatcher(
+            db, _usdt_rpc, token_address=cfg.usdt_contract_address,
+            payment_address=cfg.bsc_payment_address,
+            confirmations=int(live.get("usdt_confirmations", 3)),
+            on_credit=notify_credited,
+        )
+        watcher_task = asyncio.create_task(usdt_watcher.run_forever())
+        log.info("USDT watcher starting: address=%s", cfg.bsc_payment_address)
+    else:
+        log.info("USDT watcher not started — BSC_WSS_URL/BSC_HTTP_URL/"
+                 "BSC_PAYMENT_ADDRESS not fully configured in .env.")
+
     try:
         await dp.start_polling(bot)
     finally:
+        if usdt_watcher is not None:
+            usdt_watcher.stop()
+        if watcher_task is not None:
+            watcher_task.cancel()
+        if _usdt_rpc is not None:
+            await _usdt_rpc.aclose()
         await zentra.aclose()
         await db.close()
 

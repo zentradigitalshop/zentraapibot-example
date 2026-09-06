@@ -117,7 +117,7 @@ own system, covered rail by rail as each phase lands:
 | Rail | Automatic detection | Status |
 |---|---|---|
 | Wallet credited by hand | — (an admin decision) | ✅ works today |
-| USDT (BEP-20) | on-chain, watched live | Phase 2 |
+| USDT (BEP-20) | on-chain, watched by polling | ✅ works today |
 | Binance Pay | Binance's merchant webhook | Phase 3 |
 | Telebirr | manual by default; automatic with LocalPaymentVerify | Phase 5 |
 | Bank of Abyssinia | manual by default; automatic with LocalPaymentVerify | Phase 5 |
@@ -125,7 +125,67 @@ own system, covered rail by rail as each phase lands:
 Every rail, once built, keeps the manual path as a permanent fallback —
 never a payment that "didn't match" and simply vanished.
 
-## 8. The admin dashboard
+## 9. USDT (BEP-20) — how a payment is actually recognised
+
+BEP-20 transfers carry no memo field. There is nowhere to write "this is
+customer #42's top-up" — a transfer is just an amount moving from one
+address to another. So **the amount itself is the fingerprint**: every
+top-up request gets a tiny unique decimal tail added on top of what the
+customer asked for (0.0001 to 0.0099 USDT), and that exact figure — tail
+included — is what they are shown and what the watcher matches against.
+
+```
+customer asks for 5.00  →  allocated exactly 5.0042  →  told to send 5.0042
+                                                              │
+                                            watcher sees a Transfer of 5.0042
+                                                              │
+                                              matches the open deposit, credits it
+```
+
+**Why the tail matters more than it looks.** Without it, two customers
+topping up 5.00 USDT at the same time would be indistinguishable on-chain —
+whichever one paid first would be credited, and the second would have paid
+into the void. `bot/db.py`'s `allocate_deposit()` is what makes the figure
+unique: each candidate tail is attempted as an `INSERT`, and a partial
+`UNIQUE` index on `(amount_expected) WHERE status = 'awaiting'` is what
+actually decides whether it collided — not a `SELECT` taken a moment
+earlier, which could already be stale by the time the `INSERT` lands.
+
+**Why an expired request's amount stays reserved.** A customer's exchange
+withdrawal can take longer than the request stayed open. If the exact
+figure were released the instant it expired, a payment arriving five
+minutes late could credit whoever is issued that same amount next —
+`cooldown_until` is what stops that: the figure stays off-limits to new
+requests well past the point the original one stopped being shown.
+
+**Confirmations.** A payment is not trusted the moment it appears in a
+block — a chain reorganisation can still remove it. `usdt_confirmations`
+(default 3) is how many blocks must sit on top of it first. Lower is
+faster; higher is safer against exactly that.
+
+**Why this starter polls instead of subscribing.** ZentraShopBot's own bot
+runs an event-driven WebSocket listener across a pool of RPC providers with
+automatic failover — the right choice at real volume, where one provider's
+outage must not mean a missed payment. This starter polls a single HTTP
+endpoint every few seconds instead (`bot/chain/watcher.py`), because
+requiring a reseller to configure provider failover before their first
+payment can be accepted is exactly the kind of setup step that keeps a
+starter kit from ever getting finished. The properties that actually
+protect money — the confirmation delay, and crediting a deposit exactly
+once per transaction hash — are unchanged either way.
+
+**Turning it on** needs both sides to agree:
+
+1. `.env`: `BSC_PAYMENT_ADDRESS` (your receiving address) and
+   `BSC_HTTP_URL` (one RPC endpoint — dRPC, Ankr, PublicNode all have free
+   tiers).
+2. The dashboard setting `usdt_enabled = yes` (a button in Phase 4; direct
+   SQL until then).
+
+Either one missing, and the top-up screen is simply never offered — see
+`bot/bot.py`'s `usdt_rail_live()`.
+
+## 10. The admin dashboard
 
 Coming in Phase 4: settings (your markup, which rails are live), a live
 order feed, your customer list, and Credit by hand — the fallback every
