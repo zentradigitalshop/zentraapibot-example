@@ -19,7 +19,7 @@ tested on its own — not a stub with `# TODO` where the money would go.
 |---|---|---|
 | **1** | The bot itself: catalogue, wallet, buying, the Zentra API client, the database, the settings system | ✅ **done** |
 | **2** | USDT (BEP-20) — automatic, watched on-chain by polling a single RPC endpoint | ✅ **done** |
-| 3 | Binance Pay — automatic, via their merchant API | planned |
+| **3** | Binance Pay — automatic, read from the operator's own account (no merchant integration) | ✅ **done** |
 | 4 | The admin dashboard — settings, orders, customers, credit by hand | planned |
 | 5 | Telebirr + Bank of Abyssinia — manual by default, automatic with LocalPaymentVerify | planned |
 
@@ -99,6 +99,27 @@ fingerprint), the confirmation delay, and why this starter polls a single
 endpoint instead of running ZentraShopBot's own multi-provider WebSocket
 listener.
 
+### Turning on Binance Pay top-ups — Phase 3
+
+**Not a merchant integration** — it reads your own personal Binance
+account's Pay history, the same way ZentraShopBot itself does this.
+
+1. Apply the third migration: `psql "$DATABASE_URL" -f supabase/migrations/0003_binance_pay.sql`
+2. Binance app → Profile → API Management → create a key with **read-only**
+   permission. Never enable withdrawals or trading on it.
+3. Find your Binance ID (a UID, near the top of your Profile page) — this
+   is what customers send to.
+4. Set `BINANCE_UID`, `BINANCE_API_KEY` and `BINANCE_API_SECRET` in `.env`,
+   then restart the bot.
+5. Turn the rail on: `UPDATE settings SET value = 'yes' WHERE key = 'binance_pay_enabled';`
+
+Same rule as USDT: both the `.env` credentials and that setting have to be
+true together. `docs/GUIDE.md` §10 covers the exact-amount matching (the
+same fingerprint trick as USDT, at a different precision), why one sweep
+covers every open request in a single API call, and the two-signal check
+that decides whether a transaction is really a payment IN before anything
+is credited.
+
 ## Architecture
 
 ```
@@ -108,6 +129,8 @@ bot/
   db.py           your own customers, wallet ledger, orders, deposits — never Zentra's data
   chain/          Phase 2: USDT (BEP-20) — abi.py decodes, rpc.py asks the chain,
                   watcher.py polls and credits
+  binance_pay.py  Phase 3: Binance Pay — reads the operator's own account,
+                  no merchant integration
   settings.py     the runtime overlay: markup and rail toggles, editable without a restart
   pricing.py      your markup, applied once, in one place
   config.py       secrets and infrastructure, read once from .env
@@ -172,6 +195,18 @@ instead.
   index, not application logic remembering. The same on-chain event
   arriving twice (a restart, an overlapping poll window) is a no-op the
   second time, not a second credit.
+- **A deposit's amount is unique PER RAIL, not globally.** A $20 USDT
+  request and a $20 Binance Pay request are matched by two entirely
+  different workers reading two entirely different systems, so there is no
+  reason to make them compete for the same figure — each rail's allocator
+  is scoped by `method` in the same index that makes the amount unique.
+  Proved by literally dropping that scoping and watching two rails
+  genuinely collide over one figure, then restoring it.
+- **A Binance Pay transaction is trusted only when two independent signals
+  agree it is incoming: the sign of the amount, and whether the receiver
+  id is the operator's own account.** The one time they might disagree — a
+  transaction type nobody anticipated — the payment is refused rather than
+  guessed at, exactly as ZentraShopBot's own matching does.
 
 ## Testing
 
@@ -185,10 +220,13 @@ python -m tests.test_config
 python -m tests.test_zentra_api
 python -m tests.test_chain_abi
 python -m tests.test_chain_rpc
+python -m tests.test_binance_pay
+python -m tests.test_binance_client
 python -m tests.test_db
 python -m tests.test_settings
 python -m tests.test_deposits
 python -m tests.test_watcher
+python -m tests.test_binance_sweep
 python -m tests.test_purchase
 python -m tests.test_topup_flow
 python -m tests.test_lint
