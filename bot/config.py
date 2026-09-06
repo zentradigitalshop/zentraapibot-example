@@ -82,7 +82,17 @@ class Config:
 
     @property
     def bsc_rpc_enabled(self) -> bool:
-        return bool(self.bsc_wss_url and self.bsc_http_url and self.bsc_payment_address)
+        """True when the USDT watcher has everything it needs to run.
+
+        BSC_WSS_URL is NOT required here, deliberately — the Phase 2 watcher
+        polls a single HTTP endpoint (see bot/chain/rpc.py's own docstring
+        for why), and requiring a WebSocket URL nobody's code reads would be
+        exactly the kind of unnecessary setup step that keeps a reseller
+        from finishing configuration. The field exists in case a future
+        phase moves to an event-driven listener; it costs nothing to leave
+        unused today.
+        """
+        return bool(self.bsc_http_url and self.bsc_payment_address)
 
     @property
     def binance_pay_enabled(self) -> bool:
