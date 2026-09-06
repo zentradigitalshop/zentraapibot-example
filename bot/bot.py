@@ -112,6 +112,7 @@ async def purchase(user_row: dict, product, quantity: int) -> dict:
         user_id=user_row["id"], zentra_product_id=product.id,
         product_name=product.name, quantity=quantity,
         price_snapshot=total, idempotency_key=idem_key,
+        zentra_price_snapshot=product.price * quantity,
     )
 
     try:
