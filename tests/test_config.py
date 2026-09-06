@@ -81,6 +81,30 @@ def main() -> None:
     assert with_wss.bsc_rpc_enabled == without_wss.bsc_rpc_enabled is True
     ok("BSC_WSS_URL makes no difference either way — it is read but not required")
 
+    # ---- the Binance Pay rail's enable condition -----------------------------------------------------
+
+    print("\nWhen the Binance Pay rail is considered configured")
+
+    cfg = load_with()
+    assert cfg.binance_pay_enabled is False
+    ok("with nothing set, the rail is off")
+
+    cfg = load_with(BINANCE_UID="732609210", BINANCE_API_KEY="key",
+                    BINANCE_API_SECRET="secret")
+    assert cfg.binance_pay_enabled is True
+    ok("a UID, key and secret together turn it on — no merchant id anywhere")
+
+    for missing in ("BINANCE_UID", "BINANCE_API_KEY", "BINANCE_API_SECRET"):
+        overrides = {"BINANCE_UID": "732609210", "BINANCE_API_KEY": "key",
+                    "BINANCE_API_SECRET": "secret", missing: None}
+        cfg = load_with(**overrides)
+        assert cfg.binance_pay_enabled is False, missing
+    ok("any one of the three missing leaves the rail off")
+
+    cfg = load_with()
+    assert cfg.binance_api_base == "https://api.binance.com"
+    ok("the API base defaults to Binance's own production host")
+
     print(f"\n{len(checks)} checks passed.")
 
 

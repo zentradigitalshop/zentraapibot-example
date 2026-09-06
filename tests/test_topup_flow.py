@@ -22,7 +22,10 @@ from tests.dbfixture import fresh_db, test_database_url  # noqa: E402
 os.environ["DATABASE_URL"] = test_database_url()
 
 from bot import bot as botmod  # noqa: E402
-from bot.bot import TopUp, topup_usdt_amount, topup_usdt_start, wallet  # noqa: E402
+from bot.bot import (  # noqa: E402
+    TopUp, topup_binance_amount, topup_binance_start, topup_usdt_amount,
+    topup_usdt_start, wallet,
+)
 
 
 class FakeState:
@@ -132,7 +135,7 @@ async def main() -> None:
     state = FakeState()
     call4 = FakeCall(5002)
     await topup_usdt_start(call4, state)
-    assert state.state == TopUp.amount
+    assert state.state == TopUp.usdt_amount
     ok("tapping it puts the conversation into the amount-entry state")
 
     # ---- entering an amount -----------------------------------------------------
@@ -173,6 +176,53 @@ async def main() -> None:
     await topup_usdt_amount(comma, comma_state)
     assert "Send exactly this much" in comma.sent[-1]
     ok("a comma-formatted amount is accepted")
+
+    # ---- Binance Pay: off, then on -----------------------------------------------------
+
+    print("\nBinance Pay, off by default")
+
+    call5 = FakeCall(5007)
+    await wallet(call5)
+    labels = _button_labels(call5.message.edited_markups[-1])
+    assert not any("Binance Pay" in label for label in labels), labels
+    ok("with binance_pay_enabled at its shipped default (no), no Binance Pay button appears")
+
+    call6 = FakeCall(5007)
+    await topup_binance_start(call6, FakeState())
+    assert call6.alerts and "not turned on" in call6.alerts[0]
+    ok("and tapping the callback directly is refused with a clear reason")
+
+    print("\nBinance Pay, live")
+
+    await db.write_setting("binance_pay_enabled", "yes", updated_by=None)
+    await botmod.live.refresh()
+    botmod.cfg = botmod.cfg.__class__(
+        **{**botmod.cfg.__dict__, "binance_uid": "732609210",
+           "binance_api_key": "key", "binance_api_secret": "secret"})
+
+    call7 = FakeCall(5008)
+    await wallet(call7)
+    labels = _button_labels(call7.message.edited_markups[-1])
+    assert any("Binance Pay" in label for label in labels), labels
+    # And the USDT button, from earlier in this test, is STILL there —
+    # turning one rail on must not turn the other off.
+    assert any("USDT" in label for label in labels), labels
+    ok("both rails' buttons appear together, independently of one another")
+
+    binance_state = FakeState()
+    binance_msg = FakeMessage(5008, text="9")
+    await topup_binance_start(FakeCall(5008), binance_state)
+    await topup_binance_amount(binance_msg, binance_state)
+    reply = binance_msg.sent[-1]
+    assert "Binance Pay" in reply and "732609210" in reply
+    ok("the Binance Pay deposit screen shows the operator's own Binance ID")
+
+    binance_deposits = [
+        d for d in await db.user_deposits((await db.user_by_telegram_id(5008))["id"])
+        if d["method"] == "binancepay"
+    ]
+    assert len(binance_deposits) == 1
+    ok("and the deposit is recorded under method='binancepay'")
 
     await db.close()
     print(f"\n{len(checks)} checks passed.")

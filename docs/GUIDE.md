@@ -118,7 +118,7 @@ own system, covered rail by rail as each phase lands:
 |---|---|---|
 | Wallet credited by hand | — (an admin decision) | ✅ works today |
 | USDT (BEP-20) | on-chain, watched by polling | ✅ works today |
-| Binance Pay | Binance's merchant webhook | Phase 3 |
+| Binance Pay | read from the operator's own account, sweep-polled | ✅ works today |
 | Telebirr | manual by default; automatic with LocalPaymentVerify | Phase 5 |
 | Bank of Abyssinia | manual by default; automatic with LocalPaymentVerify | Phase 5 |
 
@@ -185,7 +185,56 @@ once per transaction hash — are unchanged either way.
 Either one missing, and the top-up screen is simply never offered — see
 `bot/bot.py`'s `usdt_rail_live()`.
 
-## 10. The admin dashboard
+## 10. Binance Pay — not a merchant integration
+
+Binance Pay's own merchant API needs a business account and an approval
+process most resellers starting out have neither of. This rail instead
+reads **your own personal Binance account's** Pay transaction history
+through a signed, read-only API key. A customer sends an ordinary Binance
+Pay transfer to your Binance ID (a UID); the bot asks Binance what your
+own account received and matches it against open requests. No webhook,
+no merchant approval — an ordinary account with an API key is enough.
+This is exactly how ZentraShopBot itself does it.
+
+**The same amount-as-fingerprint trick as USDT**, at a different default
+precision (`binance_pay_tail_decimals`, default 4 — the same as USDT).
+There is nothing else to key a match on: a Binance Pay transfer carries no
+field that says "this is customer #42's top-up."
+
+**One API call covers every open request.** Rather than asking Binance
+once per pending deposit, `BinancePaySweeper` asks once for a window
+covering the OLDEST open request and matches every transaction it gets
+back against every deposit still waiting. A shop with nothing outstanding
+makes no call at all. This matters because the Pay history endpoint is not
+free to call, and Binance's own rate limits apply per account, not per
+customer.
+
+**Two independent signals must agree before a transaction counts as a
+payment IN**: the sign of its amount, and whether its receiver id is the
+operator's own account. Real Binance data has these always agree; the one
+time they might not — a transaction type nobody anticipated, a schema
+change — the transaction is refused rather than guessed at. This is worth
+knowing if you ever see a "transaction is ambiguous" log line: that is the
+correct, safe response to something the code does not recognise, not a
+bug to silence.
+
+**Exactly-once, no tolerance.** A payment for the wrong amount — even one
+cent off — does not match, by explicit decision: there is no way to tell
+an underpayment from a fee, and a tolerance is a discount anyone could
+discover. Two transactions matching the same amount (the unique-amount
+allocator makes this vanishingly rare, not impossible) is refused rather
+than resolved by picking one — that would be choosing whose money it is
+with no basis for the choice.
+
+**Turning it on** needs both sides to agree, the same shape as USDT:
+
+1. `.env`: `BINANCE_UID`, `BINANCE_API_KEY`, `BINANCE_API_SECRET` — a
+   **read-only** key from Binance → Profile → API Management. Never grant
+   it withdrawal or trading permission; this rail never needs to move
+   money, only read history.
+2. The dashboard setting `binance_pay_enabled = yes`.
+
+## 11. The admin dashboard
 
 Coming in Phase 4: settings (your markup, which rails are live), a live
 order feed, your customer list, and Credit by hand — the fallback every
