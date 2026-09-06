@@ -1,16 +1,17 @@
 """The Telegram bot. Phase 1 added catalogue, wallet balance, and buying.
-Phase 2 adds automatic USDT (BEP-20) top-ups, watched on-chain.
+Phase 2 added automatic USDT (BEP-20) top-ups, watched on-chain. Phase 3
+adds automatic Binance Pay top-ups, read from the operator's own account.
 
-BINANCE PAY, TELEBIRR AND BANK OF ABYSSINIA ARE NOT WIRED UP YET — Phases 3
-and 5. Until they land, an admin credits a customer by hand from the
-dashboard's Credit by hand page, which is also the fallback every rail
-keeps forever, exactly as ZentraShopBot does, because a payment that does
-not match anything automatic should never mean a customer simply loses
-their money.
+TELEBIRR AND BANK OF ABYSSINIA ARE NOT WIRED UP YET — Phase 5. Until then,
+an admin credits a customer by hand from the dashboard's Credit by hand
+page, which is also the fallback every rail keeps forever, exactly as
+ZentraShopBot does, because a payment that does not match anything
+automatic should never mean a customer simply loses their money.
 
-WHERE THE MONEY ACTUALLY MOVES: purchase() below for spending, and
-UsdtWatcher.credit_deposit (via bot/db.py) for USDT top-ups — nowhere else.
-Every button that can end in a charge calls one of exactly these two paths.
+WHERE THE MONEY ACTUALLY MOVES: purchase() below for spending; db.py's
+credit_deposit() for every top-up rail, called from UsdtWatcher and
+BinancePaySweeper alike — nowhere else. Every button that can end in a
+charge calls one of exactly these paths.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from aiogram.types import (
     Message,
 )
 
+from .binance_pay import BinancePayClient, BinancePaySweeper
 from .chain import BscRpc, UsdtWatcher
 from .config import Config
 from .db import Db
@@ -54,10 +56,13 @@ dp = Dispatcher()
 
 usdt_watcher: UsdtWatcher | None = None
 _usdt_rpc: BscRpc | None = None
+binance_sweeper: BinancePaySweeper | None = None
+_binance_client: BinancePayClient | None = None
 
 
 class TopUp(StatesGroup):
-    amount = State()
+    usdt_amount = State()
+    binance_amount = State()
 
 
 def button(text: str, callback_data: str) -> InlineKeyboardButton:
@@ -271,6 +276,13 @@ def usdt_rail_live() -> bool:
     return bool(live.get("usdt_enabled", False)) and cfg.bsc_rpc_enabled
 
 
+def binance_rail_live() -> bool:
+    """Same shape as usdt_rail_live(): the dashboard switch AND the
+    deployment's own credentials (BINANCE_UID, BINANCE_API_KEY,
+    BINANCE_API_SECRET in .env) both have to be true."""
+    return bool(live.get("binance_pay_enabled", False)) and cfg.binance_pay_enabled
+
+
 @dp.callback_query(F.data == "wallet")
 async def wallet(call: CallbackQuery) -> None:
     user = await db.ensure_user(call.from_user.id, call.from_user.username)
@@ -278,10 +290,12 @@ async def wallet(call: CallbackQuery) -> None:
     rows = []
     if usdt_rail_live():
         rows.append([button("➕ Top up with USDT (BEP-20)", "topup_usdt")])
+    if binance_rail_live():
+        rows.append([button("➕ Top up with Binance Pay", "topup_binance")])
     rows.append([button("« Menu", "home")])
 
     text = f"💳 <b>Your wallet</b>\n\nBalance: <b>{fmt_usdt(balance)}</b>"
-    if not usdt_rail_live():
+    if not usdt_rail_live() and not binance_rail_live():
         text += ("\n\nTo top up, contact support — automatic top-ups "
                  "are not turned on yet.")
 
@@ -296,7 +310,7 @@ async def topup_usdt_start(call: CallbackQuery, state: FSMContext) -> None:
         return
 
     minimum = live.decimal("min_topup_usd", "1")
-    await state.set_state(TopUp.amount)
+    await state.set_state(TopUp.usdt_amount)
     await call.message.edit_text(
         f"➕ <b>Top up with USDT</b>\n\n"
         f"How much do you want to add? Send a number — minimum {fmt_usdt(minimum)}.",
@@ -305,7 +319,7 @@ async def topup_usdt_start(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
-@dp.message(TopUp.amount)
+@dp.message(TopUp.usdt_amount)
 async def topup_usdt_amount(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip().replace(",", "")
     try:
@@ -354,6 +368,70 @@ async def topup_usdt_amount(message: Message, state: FSMContext) -> None:
     )
 
 
+@dp.callback_query(F.data == "topup_binance")
+async def topup_binance_start(call: CallbackQuery, state: FSMContext) -> None:
+    if not binance_rail_live():
+        await call.answer("Binance Pay top-ups are not turned on.", show_alert=True)
+        return
+
+    minimum = live.decimal("min_topup_usd", "1")
+    await state.set_state(TopUp.binance_amount)
+    await call.message.edit_text(
+        f"➕ <b>Top up with Binance Pay</b>\n\n"
+        f"How much do you want to add? Send a number — minimum {fmt_usdt(minimum)}.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("« Cancel", "wallet")]]),
+    )
+    await call.answer()
+
+
+@dp.message(TopUp.binance_amount)
+async def topup_binance_amount(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace(",", "")
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        await message.answer("That doesn't look like a number. Try again, or /start to cancel.")
+        return
+
+    minimum = live.decimal("min_topup_usd", "1")
+    if amount < minimum:
+        await message.answer(
+            f"The smallest top-up is {fmt_usdt(minimum)}. Send a larger amount, "
+            f"or /start to cancel."
+        )
+        return
+
+    await state.clear()
+    user = await db.ensure_user(message.from_user.id, message.from_user.username)
+
+    try:
+        deposit = await db.allocate_deposit(
+            user_id=user["id"], base_amount=amount, method="binancepay",
+            window_minutes=int(live.get("deposit_window_minutes", 60)),
+            cooldown_minutes=int(live.get("binance_pay_amount_cooldown_minutes", 180)),
+            tail_min=1, tail_max=99,
+            tail_decimals=int(live.get("binance_pay_tail_decimals", 4)),
+        )
+    except RuntimeError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+
+    exact = Decimal(deposit["amount_expected"])
+    minutes = int(live.get("deposit_window_minutes", 60))
+    await message.answer(
+        f"💳 <b>Send exactly this much</b>\n\n"
+        f"Via <b>Binance Pay</b>, to Binance ID:\n<code>{html.escape(cfg.binance_uid)}</code>\n\n"
+        f"<code>{exact}</code> USDT\n\n"
+        f"⚠️ <b>Send exactly {exact}, not a rounded number.</b> Those last "
+        f"digits are how this is recognised as yours — a rounded amount is "
+        f"not detected automatically.\n\n"
+        f"Your balance updates on its own once the transfer is found, "
+        f"usually within a few seconds. You do not need to come back here.\n\n"
+        f"<i>Valid for {minutes} minutes.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("« Menu", "home")]]),
+    )
+
+
 @dp.callback_query(F.data == "orders")
 async def orders(call: CallbackQuery) -> None:
     user = await db.ensure_user(call.from_user.id, call.from_user.username)
@@ -374,9 +452,9 @@ async def orders(call: CallbackQuery) -> None:
 
 
 async def notify_credited(deposit: dict) -> None:
-    """Tell a customer their USDT top-up landed. Runs AFTER the balance is
-    already updated — this never decides whether to credit anything, only
-    whether the customer hears about it."""
+    """Tell a customer their top-up landed, on whichever rail credited it.
+    Runs AFTER the balance is already updated — this never decides whether
+    to credit anything, only whether the customer hears about it."""
     user = await db.user_by_id(deposit["user_id"])
     if user is None:
         return
@@ -397,7 +475,7 @@ async def notify_credited(deposit: dict) -> None:
 # ---- lifecycle -----------------------------------------------------------
 
 async def main() -> None:
-    global usdt_watcher, _usdt_rpc
+    global usdt_watcher, _usdt_rpc, binance_sweeper, _binance_client
 
     await db.connect()
     await live.refresh()
@@ -428,8 +506,28 @@ async def main() -> None:
         watcher_task = asyncio.create_task(usdt_watcher.run_forever())
         log.info("USDT watcher starting: address=%s", cfg.bsc_payment_address)
     else:
-        log.info("USDT watcher not started — BSC_WSS_URL/BSC_HTTP_URL/"
-                 "BSC_PAYMENT_ADDRESS not fully configured in .env.")
+        log.info("USDT watcher not started — BSC_HTTP_URL/BSC_PAYMENT_ADDRESS "
+                 "not fully configured in .env.")
+
+    sweeper_task = None
+    if cfg.binance_pay_enabled:
+        # Same reasoning as the USDT watcher above: started whenever the
+        # DEPLOYMENT has credentials, independent of the dashboard switch.
+        _binance_client = BinancePayClient(
+            cfg.binance_uid, cfg.binance_api_key, cfg.binance_api_secret,
+            base_url=cfg.binance_api_base,
+        )
+        binance_sweeper = BinancePaySweeper(
+            db, _binance_client,
+            lookback_minutes=int(live.get("binance_pay_lookback_minutes", 180)),
+            sweep_seconds=int(live.get("binance_pay_sweep_seconds", 20)),
+            on_credit=notify_credited,
+        )
+        sweeper_task = asyncio.create_task(binance_sweeper.run_forever())
+        log.info("Binance Pay sweeper starting: uid=%s", cfg.binance_uid)
+    else:
+        log.info("Binance Pay sweeper not started — BINANCE_UID/BINANCE_API_KEY/"
+                 "BINANCE_API_SECRET not fully configured in .env.")
 
     try:
         await dp.start_polling(bot)
@@ -440,6 +538,12 @@ async def main() -> None:
             watcher_task.cancel()
         if _usdt_rpc is not None:
             await _usdt_rpc.aclose()
+        if binance_sweeper is not None:
+            binance_sweeper.stop()
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+        if _binance_client is not None:
+            await _binance_client.aclose()
         await zentra.aclose()
         await db.close()
 

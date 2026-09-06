@@ -238,25 +238,33 @@ class Db:
 
     async def allocate_deposit(
         self, *, user_id: int, base_amount: Decimal, window_minutes: int,
-        cooldown_minutes: int, tail_min: int = 1, tail_max: int = 99,
-        tail_decimals: int = 4,
+        cooldown_minutes: int, method: str = "usdt", tail_min: int = 1,
+        tail_max: int = 99, tail_decimals: int = 4,
     ) -> Row:
-        """Reserve a unique on-chain amount for this customer, and return it.
+        """Reserve a unique amount for this customer on this rail, and
+        return it.
 
         THE DATABASE DECIDES WHICH AMOUNT IS FREE, NOT A SELECT. Each
         candidate tail is simply attempted as an INSERT; the partial unique
-        index on (amount_expected) WHERE status='awaiting' answers "is this
-        amount free right now?" at the only moment that question matters —
-        a SELECT taken a moment earlier could already be stale by the time
-        this INSERT lands, and two customers would then be told to send the
-        exact same figure.
+        index on (method, amount_expected) WHERE status='awaiting' answers
+        "is this amount free right now, for THIS rail?" at the only moment
+        that question matters — a SELECT taken a moment earlier could
+        already be stale by the time this INSERT lands, and two customers
+        would then be told to send the exact same figure.
+
+        SCOPED BY METHOD: a $20 USDT request and a $20 Binance Pay request
+        are matched by two entirely different workers reading two entirely
+        different systems, so they cannot be confused for one another —
+        there is no reason to make the two rails compete for the same
+        amount-space, and every rail gets the full tail range to itself.
 
         The WHERE NOT EXISTS clause is the other half: it refuses a tail
         still cooling down from a request that expired but might yet be
-        paid. That check has its own tiny race — two INSERTs evaluating it
-        at once could both pass — but if they do, both attempt to become
-        'awaiting' with the same amount, and the TRUE unique index catches
-        that collision regardless, converting one into a retry.
+        paid, on the SAME rail. That check has its own tiny race — two
+        INSERTs evaluating it at once could both pass — but if they do,
+        both attempt to become 'awaiting' with the same (method, amount),
+        and the TRUE unique index catches that collision regardless,
+        converting one into a retry.
 
         Tails are shuffled, not tried in order, so two callers starting at
         the same instant diverge immediately instead of colliding down the
@@ -273,17 +281,18 @@ class Db:
 
             try:
                 row = await self.fetchone(
-                    "INSERT INTO deposits (user_id, amount_expected, amount_credited, "
-                    "expires_at, cooldown_until) "
-                    "SELECT %s, %s, %s, "
+                    "INSERT INTO deposits (user_id, method, amount_expected, "
+                    "amount_credited, expires_at, cooldown_until) "
+                    "SELECT %s, %s, %s, %s, "
                     "       now() + make_interval(mins => %s), "
                     "       now() + make_interval(mins => %s) "
                     "WHERE NOT EXISTS ("
                     "  SELECT 1 FROM deposits "
-                    "   WHERE amount_expected = %s AND cooldown_until > now())"
+                    "   WHERE method = %s AND amount_expected = %s "
+                    "     AND cooldown_until > now())"
                     "RETURNING *",
-                    (user_id, exact, credited, window_minutes,
-                     window_minutes + cooldown_minutes, exact),
+                    (user_id, method, exact, credited, window_minutes,
+                     window_minutes + cooldown_minutes, method, exact),
                 )
             except psycopg.errors.UniqueViolation:
                 continue  # another deposit holds this amount, right now
@@ -300,8 +309,8 @@ class Db:
     async def deposit_by_id(self, deposit_id: int) -> Row | None:
         return await self.fetchone("SELECT * FROM deposits WHERE id = %s", (deposit_id,))
 
-    async def open_deposit_for_amount(self, amount: Decimal) -> Row | None:
-        """The live deposit expecting exactly this amount, if any.
+    async def open_deposit_for_amount(self, amount: Decimal, *, method: str = "usdt") -> Row | None:
+        """The live deposit on this rail expecting exactly this amount, if any.
 
         `status IN ('awaiting', 'expired')` on purpose: a late payment on an
         expired request is still real money owed to that customer, not
@@ -309,9 +318,9 @@ class Db:
         entire point of the cooldown reservation.
         """
         return await self.fetchone(
-            "SELECT * FROM deposits WHERE amount_expected = %s "
+            "SELECT * FROM deposits WHERE method = %s AND amount_expected = %s "
             "  AND status IN ('awaiting', 'expired') AND tx_hash IS NULL",
-            (amount,),
+            (method, amount),
         )
 
     async def credit_deposit(self, deposit_id: int, *, tx_hash: str) -> Row | None:
