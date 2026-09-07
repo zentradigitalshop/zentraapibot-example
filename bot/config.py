@@ -19,6 +19,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+# Loads the repo-root .env into the real process environment. Every other
+# read in this file goes through os.environ — this is the one place that
+# has to run first, and importing this module is what everything else in
+# the bot already does before touching Config, so it runs exactly once,
+# before anything asks for a variable.
+load_dotenv()
+
 
 def _str(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()

@@ -69,9 +69,12 @@ psql "$DATABASE_URL" -f supabase/migrations/0001_initial_schema.sql
 serverless. This process is long-running, not serverless, and the session
 pooler is what stays warm.)
 
-**Run it:**
+**Run it** (from the repo root — `python -m bot.bot` needs to see the `bot`
+package, so step out of `bot/` first if you're still in it from the venv
+setup above):
 
 ```bash
+cd ..
 python -m bot.bot
 ```
 
