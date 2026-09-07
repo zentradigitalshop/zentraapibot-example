@@ -1,8 +1,7 @@
-"""The Telegram bot. Phase 1 added catalogue, wallet balance, and buying.
-Phase 2 added automatic USDT (BEP-20) top-ups, watched on-chain. Phase 3
-added automatic Binance Pay top-ups, read from the operator's own account.
-Phase 5 adds Telebirr and Bank of Abyssinia — manual by default, automatic
-when LocalPaymentVerify is configured.
+"""The Telegram bot: catalogue, wallet balance, and buying, plus every
+top-up rail — automatic USDT (BEP-20) watched on-chain, automatic Binance
+Pay read from the operator's own account, and Telebirr / Bank of Abyssinia
+(manual by default, automatic when LocalPaymentVerify is configured).
 
 WHERE THE MONEY ACTUALLY MOVES: purchase() below for spending; db.py's
 credit_deposit() for every top-up rail — called from UsdtWatcher and
@@ -478,7 +477,7 @@ async def topup_binance_amount(message: Message, state: FSMContext) -> None:
     )
 
 
-# ---- Telebirr / Bank of Abyssinia (Phase 5) --------------------------------
+# ---- Telebirr / Bank of Abyssinia -------------------------------------------
 #
 # UNLIKE USDT AND BINANCE PAY, THIS RAIL DOES NOT MATCH BY AMOUNT — see
 # localpay.py's header for why. So there is no allocator step: the request

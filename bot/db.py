@@ -237,7 +237,7 @@ class Db:
                     (key, old_value, value, updated_by),
                 )
 
-    # ---- USDT deposits (Phase 2) -------------------------------------------
+    # ---- USDT deposits ------------------------------------------------------
     #
     # HOW A DEPOSIT IS IDENTIFIED: by its exact amount, tail included — see
     # the header comment on the migration for why. Every method below exists
@@ -422,7 +422,7 @@ class Db:
             (user_id, limit),
         )
 
-    # ---- Telebirr / Bank of Abyssinia deposits (Phase 5) -------------------
+    # ---- Telebirr / Bank of Abyssinia deposits -------------------------------
     #
     # These rails identify a payment by its REFERENCE, not its amount — see
     # localpay.py's own header for why. So there is no allocator here: a

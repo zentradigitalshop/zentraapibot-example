@@ -1,4 +1,4 @@
-# Admin Dashboard (Phase 4)
+# Admin Dashboard
 
 A Next.js app, deployed on its own — same shape as
 [ZentraShopBot's own admin dashboard](https://github.com/snackshell/zentrashopbot-admin):
@@ -7,8 +7,8 @@ single-password login (no separate user system), and every write going
 through a plain `<form action={...}>` server action rather than
 client-side JavaScript.
 
-See the root `README.md`'s "Turning on the admin dashboard — Phase 4"
-section for setup, and `docs/GUIDE.md` §11 for the full design writeup.
+See the root `README.md`'s "The admin dashboard" section for setup, and
+`docs/GUIDE.md` §11 for the full design writeup.
 
 ## Pages
 

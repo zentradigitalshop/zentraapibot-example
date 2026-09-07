@@ -1,9 +1,9 @@
 # The Zentra API Starter Guide
 
 Everything you need to run your own resale shop on top of the
-[Zentra Reseller API](https://zentradigital.shop/api/docs). This guide
-grows with the project — each phase in the README adds its own section
-here once it exists, rather than describing something you cannot run yet.
+[Zentra Reseller API](https://zentradigital.shop/api/docs), section by
+section, feature by feature — nothing here describes something you cannot
+run today.
 
 ## 1. Get a Zentra API key
 
@@ -112,18 +112,18 @@ in a moment", not a silent infinite retry loop against Zentra's servers.
 
 This is a different question from anything above: Zentra only cares that
 your *key* has a balance. How *your* customers pay *you* is entirely your
-own system, covered rail by rail as each phase lands:
+own system, covered rail by rail below:
 
-| Rail | Automatic detection | Status |
-|---|---|---|
-| Wallet credited by hand | — (an admin decision) | ✅ works today |
-| USDT (BEP-20) | on-chain, watched by polling | ✅ works today |
-| Binance Pay | read from the operator's own account, sweep-polled | ✅ works today |
-| Telebirr | manual by default; automatic with LocalPaymentVerify | Phase 5 |
-| Bank of Abyssinia | manual by default; automatic with LocalPaymentVerify | Phase 5 |
+| Rail | Automatic detection |
+|---|---|
+| Wallet credited by hand | — (an admin decision) |
+| USDT (BEP-20) | on-chain, watched by polling |
+| Binance Pay | read from the operator's own account, sweep-polled |
+| Telebirr | manual by default; automatic with LocalPaymentVerify |
+| Bank of Abyssinia | manual by default; automatic with LocalPaymentVerify |
 
-Every rail, once built, keeps the manual path as a permanent fallback —
-never a payment that "didn't match" and simply vanished.
+Every rail keeps the manual path as a permanent fallback — never a payment
+that "didn't match" and simply vanished.
 
 ## 9. USDT (BEP-20) — how a payment is actually recognised
 
@@ -179,8 +179,8 @@ once per transaction hash — are unchanged either way.
 1. `.env`: `BSC_PAYMENT_ADDRESS` (your receiving address) and
    `BSC_HTTP_URL` (one RPC endpoint — dRPC, Ankr, PublicNode all have free
    tiers).
-2. The dashboard setting `usdt_enabled = yes` (a button in Phase 4; direct
-   SQL until then).
+2. The dashboard setting `usdt_enabled = yes` (a button on the Settings
+   page, or direct SQL).
 
 Either one missing, and the top-up screen is simply never offered — see
 `bot/bot.py`'s `usdt_rail_live()`.
