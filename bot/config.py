@@ -103,7 +103,7 @@ class Config:
     def bsc_rpc_enabled(self) -> bool:
         """True when the USDT watcher has everything it needs to run.
 
-        BSC_WSS_URL is NOT required here, deliberately — the Phase 2 watcher
+        BSC_WSS_URL is NOT required here, deliberately — the USDT watcher
         polls a single HTTP endpoint (see bot/chain/rpc.py's own docstring
         for why), and requiring a WebSocket URL nobody's code reads would be
         exactly the kind of unnecessary setup step that keeps a reseller

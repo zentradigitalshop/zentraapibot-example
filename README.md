@@ -12,24 +12,27 @@ how your own customers pay you.
 
 ## What this is, honestly
 
-This is being built in phases, each one a complete slice that runs and is
-tested on its own — not a stub with `# TODO` where the money would go.
+A complete slice that runs and is tested end to end — not a stub with
+`# TODO` where the money would go. It includes:
 
-| Phase | What it adds | Status |
-|---|---|---|
-| **1** | The bot itself: catalogue, wallet, buying, the Zentra API client, the database, the settings system | ✅ **done** |
-| **2** | USDT (BEP-20) — automatic, watched on-chain by polling a single RPC endpoint | ✅ **done** |
-| **3** | Binance Pay — automatic, read from the operator's own account (no merchant integration) | ✅ **done** |
-| **4** | The admin dashboard — overview, settings, orders, customers, deposits, credit by hand | ✅ **done** |
-| **5** | Telebirr + Bank of Abyssinia — manual by default, automatic with LocalPaymentVerify | ✅ **done** |
+- **The bot itself** — catalogue, wallet, buying, the Zentra API client,
+  the database, the settings system.
+- **USDT (BEP-20) top-ups** — automatic, watched on-chain by polling a
+  single RPC endpoint.
+- **Binance Pay top-ups** — automatic, read from the operator's own
+  account (no merchant integration).
+- **The admin dashboard** — overview, settings, orders, customers,
+  deposits, credit by hand.
+- **Telebirr and Bank of Abyssinia top-ups** — manual by default,
+  automatic with LocalPaymentVerify.
 
-**Right now, with just Phase 1**, the bot runs completely: customers browse
-the real Zentra catalogue at your markup, and an admin credits a balance by
-hand — a raw `UPDATE users SET balance_usd = ...`, or the dashboard's
-"Credit by hand" page from Phase 4 onward. That is not a placeholder — it
-is the exact fallback every payment rail below keeps forever, in this
-project and in ZentraShopBot itself, because a payment that does not match
-anything automatic should never mean a customer simply loses their money.
+**Even with no payment rail turned on**, the bot runs completely: customers
+browse the real Zentra catalogue at your markup, and an admin credits a
+balance by hand — a raw `UPDATE users SET balance_usd = ...`, or the
+dashboard's "Credit by hand" page. That is not a placeholder — it is the
+exact fallback every payment rail below keeps forever, in this project and
+in ZentraShopBot itself, because a payment that does not match anything
+automatic should never mean a customer simply loses their money.
 
 ## Why a starter kit, not a one-click fork
 
@@ -41,7 +44,7 @@ resell never get through setup. This gives you a running bot today, and
 each rail as a self-contained addition you can adopt when you are ready for
 what it requires — never before.
 
-## Quickstart (Phase 1)
+## Quickstart
 
 ```bash
 cd bot
@@ -81,7 +84,7 @@ INSERT INTO wallet_txns (user_id, amount_usd, kind) VALUES (
   (SELECT id FROM users WHERE telegram_id = 123456789), 10.00, 'admin_credit');
 ```
 
-### Turning on USDT (BEP-20) top-ups — Phase 2
+### USDT (BEP-20) top-ups
 
 1. Apply the second migration: `psql "$DATABASE_URL" -f supabase/migrations/0002_usdt_deposits.sql`
 2. Get a public BSC receiving address — a wallet you hold, never an
@@ -100,7 +103,7 @@ fingerprint), the confirmation delay, and why this starter polls a single
 endpoint instead of running ZentraShopBot's own multi-provider WebSocket
 listener.
 
-### Turning on Binance Pay top-ups — Phase 3
+### Binance Pay top-ups
 
 **Not a merchant integration** — it reads your own personal Binance
 account's Pay history, the same way ZentraShopBot itself does this.
@@ -123,7 +126,7 @@ covers every open request in a single API call, and the two-signal check
 that decides whether a transaction is really a payment IN before anything
 is credited.
 
-### Turning on the admin dashboard — Phase 4
+### The admin dashboard
 
 A separate Next.js app in `dashboard/`, run and deployed on its own — it
 reads and writes the exact same database as the bot, so nothing here needs
@@ -142,7 +145,7 @@ Open `http://localhost:3000`, sign in with `ADMIN_PASSWORD`. Seven pages:
 and **Customers** (searchable, with the same numbers the bot itself
 computed at the time — nothing here re-derives a price after the fact),
 **Deposits** (every top-up request on every rail, and whether it was
-credited), **Local Payments** (Phase 5's review queue for Telebirr/Abyssinia
+credited), **Local Payments** (the review queue for Telebirr/Abyssinia
 requests waiting on a person), **Credit by hand** (the fallback above, from
 a form instead of raw SQL, still guarded by the same conditional-`UPDATE`
 rule as every other balance change in this project), and **Settings** (the
@@ -161,7 +164,7 @@ why it connects through the session pooler like the bot does, and the
 same-guard-as-the-bot principle behind "Credit by hand" and every write
 this app makes.
 
-### Turning on Telebirr / Bank of Abyssinia — Phase 5
+### Telebirr / Bank of Abyssinia top-ups
 
 **Manual by default.** With nothing more than a receiving account
 configured, both rails work exactly like "Credit by hand" always has: a
@@ -208,13 +211,13 @@ bot/
   zentra_api.py   the ONLY file that talks to Zentra — auth, errors, money as Decimal
   bot.py          the Telegram bot; purchase() moves money out, deposits move it in
   db.py           your own customers, wallet ledger, orders, deposits — never Zentra's data
-  chain/          Phase 2: USDT (BEP-20) — abi.py decodes, rpc.py asks the chain,
+  chain/          USDT (BEP-20) — abi.py decodes, rpc.py asks the chain,
                   watcher.py polls and credits
-  binance_pay.py  Phase 3: Binance Pay — reads the operator's own account,
+  binance_pay.py  Binance Pay — reads the operator's own account,
                   no merchant integration
-  localverify.py  Phase 5: the LocalPaymentVerify client — fetches a Telebirr/
+  localverify.py  the LocalPaymentVerify client — fetches a Telebirr/
                   Abyssinia receipt, decides nothing about it
-  localpay.py     Phase 5: every rule a fetched receipt has to pass before
+  localpay.py     every rule a fetched receipt has to pass before
                   it becomes money — reference, receiver, amount, freshness
   settings.py     the runtime overlay: markup and rail toggles, editable without a restart
   pricing.py      your markup, applied once, in one place
@@ -222,7 +225,7 @@ bot/
   money.py        Decimal rounding and display — the only place either happens
 
 supabase/migrations/   your schema, applied in order, same convention as ZentraShopBot
-dashboard/              Phase 4: the admin dashboard — a separate Next.js app
+dashboard/              the admin dashboard — a separate Next.js app
   src/lib/              searches and writes, kept apart from pages so they test
                         against a real database with no request in sight
   src/app/              one route per page: overview, orders, customers,
