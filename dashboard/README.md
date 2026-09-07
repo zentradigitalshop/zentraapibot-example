@@ -1,8 +1,7 @@
 # Admin Dashboard
 
-A Next.js app, deployed on its own — same shape as
-[ZentraShopBot's own admin dashboard](https://github.com/snackshell/zentrashopbot-admin):
-server components reading the same PostgreSQL database the bot writes to, a
+A Next.js app, deployed on its own: server components reading the same
+PostgreSQL database the bot writes to, a
 single-password login (no separate user system), and every write going
 through a plain `<form action={...}>` server action rather than
 client-side JavaScript.
