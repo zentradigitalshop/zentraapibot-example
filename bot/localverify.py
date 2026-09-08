@@ -13,7 +13,7 @@ verifier.py does.
 
 WHERE IT RUNS. This client talks to whatever LOCAL_VERIFY_URL points at —
 typically a LocalPaymentVerify instance on the same box's loopback
-interface (github.com/snackshell/localpaymentverify), so the service's own
+interface (see README.md for where to get it), so the service's own
 provider credentials never reach this bot.
 
 SCOPE REDUCTION FROM ZENTRASHOPBOT'S OWN CLIENT: no receipt-image reading
